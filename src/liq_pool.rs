@@ -1,11 +1,8 @@
 use crate::calc::*;
 use crate::error::{LiqPoolError, Result};
 
-/// Mathematical model of unstake liquidity pool with linear swap fee as described
-/// in [`Marinade documentation`]
-///
-/// [`Marinade documentation`]: https://docs.marinade.finance/marinade-protocol/system-overview/unstake-liquidity-pool
-struct LiqPool {
+/// Mathematical model of unstake liquidity pool with linear swap fee.
+pub struct LiqPool {
     max_fee: u64,
     min_fee: u64,
     liq_target: u64,
@@ -46,7 +43,7 @@ impl LiqPool {
 
     /// Simulate removing liquidity from the pool.
     ///
-    /// Caller gets token and st_token in propotion to their presence in liquidity pool
+    /// Caller gets token and st_token in propotion to their presence in liquidity pool.
     pub fn remove_liquidity(&mut self, lp_token_amount: u64) -> Result<(u64, u64)> {
         if lp_token_amount > self.lp_token_supply {
             return Err(LiqPoolError::InvalidInputData(
