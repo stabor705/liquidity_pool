@@ -6,6 +6,7 @@ pub struct LiqPool {
     max_fee: u64,
     min_fee: u64,
     liq_target: u64,
+    price: u64,
 
     token: u64,
     st_token: u64,
@@ -13,8 +14,7 @@ pub struct LiqPool {
 }
 
 impl LiqPool {
-
-    pub fn new(max_fee: u64, min_fee: u64, liq_target: u64) -> LiqPool {
+    pub fn new(max_fee: u64, min_fee: u64, liq_target: u64, price: u64) -> LiqPool {
         if max_fee < min_fee {
             panic!("LiqPool: Max fee cannot be smaller than min fee");
         }
@@ -22,6 +22,7 @@ impl LiqPool {
             max_fee,
             min_fee,
             liq_target,
+            price,
             token: 0,
             st_token: 0,
             lp_token_supply: 0,
@@ -34,7 +35,8 @@ impl LiqPool {
     /// depends on ratio between total liquidity pool value (token + st_token)
     /// and lp_token_supply.
     pub fn add_liquidity(&mut self, token_amount: u64) -> Result<u64> {
-        let total_liq_pool_value = self.st_token + self.token;
+        let st_token_value = value(self.st_token, self.price)?;
+        let total_liq_pool_value = st_token_value + self.token;
         let lp_token_to_mint = shares(token_amount, total_liq_pool_value, self.lp_token_supply)?;
         self.token += token_amount;
         self.lp_token_supply += lp_token_to_mint;
@@ -66,8 +68,9 @@ impl LiqPool {
     /// tokens back, without delay, for a fee that depends lineary on current
     /// liquidity of the pool.
     pub fn swap(&mut self, st_token_amount: u64) -> Result<u64> {
-        let fee = self.linear_fee(st_token_amount)?;
-        let out_token_amount = apply_fee(st_token_amount, fee)?;
+        let token_amount = value(st_token_amount, self.price)?;
+        let fee = self.linear_fee(token_amount)?;
+        let out_token_amount = apply_fee(token_amount, fee)?;
         if out_token_amount > self.token {
             return Err(LiqPoolError::InsufficientLiquidity);
         }
@@ -79,12 +82,12 @@ impl LiqPool {
 
     /// Compute fee based on st_token_amount swapped and current state of
     /// liquidity pool.
-    fn linear_fee(&self, st_token_amount: u64) -> Result<u64> {
-        if st_token_amount > self.token {
+    fn linear_fee(&self, token_amount: u64) -> Result<u64> {
+        if token_amount > self.token {
             return Ok(self.max_fee);
         }
         // Fee is computed based on liquidity AFTER swap operation.
-        let liq_after = self.token - st_token_amount;
+        let liq_after = self.token - token_amount;
         if liq_after >= self.liq_target {
             Ok(self.min_fee)
         } else {
@@ -98,7 +101,7 @@ mod tests {
     use super::*;
 
     fn get_example_lp() -> LiqPool {
-        LiqPool::new(3 * UNIT / 100, 3 * UNIT / 1000, 100000 * UNIT)
+        LiqPool::new(3 * UNIT / 100, 3 * UNIT / 1000, 100000 * UNIT, 2 * UNIT)
     }
 
     /* Simple testing single operations */
@@ -113,7 +116,8 @@ mod tests {
         let lp_token_amount = liq_pool.add_liquidity(500 * UNIT).unwrap();
         assert_eq!(lp_token_amount, 500 * UNIT);
         assert_eq!(liq_pool.lp_token_supply, 500 * UNIT);
-        assert_eq!(liq_pool.token, 500 * UNIT)
+        assert_eq!(liq_pool.token, 500 * UNIT);
+        assert_eq!(liq_pool.st_token, 0);
     }
 
     // Removing liquidity should:
@@ -132,12 +136,14 @@ mod tests {
         assert_eq!(st_token_amount, 50 * UNIT);
         assert_eq!(liq_pool.token, 250 * UNIT);
         assert_eq!(liq_pool.st_token, 50 * UNIT);
+        assert_eq!(liq_pool.lp_token_supply, 300 * UNIT);
 
         let (token_amount, st_token_amount) = liq_pool.remove_liquidity(300 * UNIT).unwrap();
         assert_eq!(token_amount, 250 * UNIT);
         assert_eq!(st_token_amount, 50 * UNIT);
         assert_eq!(liq_pool.token, 0);
         assert_eq!(liq_pool.st_token, 0);
+        assert_eq!(liq_pool.lp_token_supply, 0);
     }
 
     // Tests based on examples in marinade docs
@@ -154,21 +160,30 @@ mod tests {
     fn test_linear_fee_with_target_not_reached() {
         let mut liq_pool = get_example_lp();
         liq_pool.add_liquidity(100030 * UNIT).unwrap();
-        assert_eq!(liq_pool.linear_fee(9030 * UNIT).unwrap(), 543 * UNIT / 100000);
+        assert_eq!(
+            liq_pool.linear_fee(9030 * UNIT).unwrap(),
+            543 * UNIT / 100000
+        );
+    }
+
+    fn generic_swapping_test(init_liq: u64, swap_amount: u64, expected_token_amount: u64) {
+        let mut liq_pool = get_example_lp();
+        liq_pool.add_liquidity(init_liq).unwrap();
+        let token_amount = liq_pool.swap(swap_amount).unwrap();
+        assert_eq!(token_amount, expected_token_amount);
+        assert_eq!(liq_pool.token, init_liq - token_amount);
+        assert_eq!(liq_pool.st_token, swap_amount);
+        assert_eq!(liq_pool.lp_token_supply, init_liq);
     }
 
     #[test]
     fn test_swapping_with_target_reached() {
-        let mut liq_pool = get_example_lp();
-        liq_pool.add_liquidity(581250 * UNIT).unwrap();
-        assert_eq!(liq_pool.swap(90 * UNIT).unwrap(), 8973 * UNIT / 100)
+        generic_swapping_test(581250 * UNIT, 45 * UNIT, 8973 * UNIT / 100);
     }
 
     #[test]
     fn test_swapping_with_target_not_reached() {
-        let mut liq_pool = get_example_lp();
-        liq_pool.add_liquidity(100030 * UNIT).unwrap();
-        assert_eq!(liq_pool.swap(9030 * UNIT).unwrap(), 8980967100000);
+        generic_swapping_test(100030 * UNIT, 4515 * UNIT, 8980967100000);
     }
 
     /* Test error handling */
@@ -189,27 +204,31 @@ mod tests {
 
     #[test]
     fn test_complex_scenerio() {
-        let mut liq_pool = LiqPool::new(3 * UNIT / 100, 3 * UNIT / 1000, 500 * UNIT);
+        let mut liq_pool = LiqPool::new(3 * UNIT / 100, 3 * UNIT / 1000, 500 * UNIT, 2 * UNIT);
         // Alice puts 800 token in liq pool.
         liq_pool.add_liquidity(800 * UNIT).unwrap();
-        // Bob could not wait and used immediate unstake with 300 st token.
+        assert_eq!(liq_pool.token, 800 * UNIT);
+        assert_eq!(liq_pool.st_token, 0);
+        assert_eq!(liq_pool.lp_token_supply, 800 * UNIT);
+        // Bob could not wait and used immediate unstake with 150 st_token.
         // He pays 0.3% fee because target liquidity is reached even after
-        // his unstake. That means he gets 300 - 0.3% = 299.1 token amount.
-        let token_amount = liq_pool.swap(300 * UNIT).unwrap();
+        // his unstake. Additionaly, the price of st_token is 2.
+        // That means he gets 150 * 2 - 0.3% = 299.1 token amount.
+        let token_amount = liq_pool.swap(150 * UNIT).unwrap();
         assert_eq!(token_amount, 2991 * UNIT / 10);
         assert_eq!(liq_pool.token, 5009 * UNIT / 10);
-        assert_eq!(liq_pool.st_token, 300 * UNIT);
+        assert_eq!(liq_pool.st_token, 150 * UNIT);
         assert_eq!(liq_pool.lp_token_supply, 800 * UNIT);
-        // Now Carlos also unstakes 300. This time he pays bigger fee, because
+        // Now Carlos also unstakes 150. This time he pays bigger fee, because
         // after his unstake liquidity target will not be reached.
         // He pays 3% - ((3% - 0.3%) * (liq_after/liq_target))
-        //       = 3% - 2.7% * (500.9 - 300)/500
+        //       = 3% - (2.7% * (500.9 - 300)/500)
         //       = 1.91514%
         // 300 - 1.91514% = 294.25458
-        let token_amount = liq_pool.swap(300 * UNIT).unwrap();
+        let token_amount = liq_pool.swap(150 * UNIT).unwrap();
         assert_eq!(token_amount, 29425458 * UNIT / 100000);
         assert_eq!(liq_pool.token, 20664542 * UNIT / 100000);
-        assert_eq!(liq_pool.st_token, 600 * UNIT);
+        assert_eq!(liq_pool.st_token, 300 * UNIT);
         assert_eq!(liq_pool.lp_token_supply, 800 * UNIT);
         // David adds liquidity to the pool. Because this time total value is
         // a little bit more than total shares (806.64542 > 800) he should get
@@ -218,18 +237,18 @@ mod tests {
         let lp_token_amount = liq_pool.add_liquidity(400 * UNIT).unwrap();
         assert_eq!(lp_token_amount, 396704663617);
         assert_eq!(liq_pool.token, 60664542 * UNIT / 100000);
-        assert_eq!(liq_pool.st_token, 600 * UNIT);
+        assert_eq!(liq_pool.st_token, 300 * UNIT);
         assert_eq!(liq_pool.lp_token_supply, 1196704663617);
         // Finally, let's say Alice removes liquidity for fun and profits.
         // She should earn more token amount now because of the fees that
         // have been collected.
         // token_amount = 200 * (token in liq pool) / (lp token supply) = 101.385987444
-        // st_token_amount = 200 * (st toke in liq pool) / (lp token supply) = 100.275367555
+        // st_token_amount = 200 * (st toke in liq pool) / (lp token supply) = 50.1376837775
         let (token_amount, st_token_amount) = liq_pool.remove_liquidity(200 * UNIT).unwrap();
         assert_eq!(token_amount, 101385987444);
-        assert_eq!(st_token_amount, 100275367555);
+        assert_eq!(st_token_amount, 50137683777);
         assert_eq!(liq_pool.token, 505259432556);
-        assert_eq!(liq_pool.st_token, 499724632445);
+        assert_eq!(liq_pool.st_token, 249862316223);
         assert_eq!(liq_pool.lp_token_supply, 996704663617);
     }
 }
